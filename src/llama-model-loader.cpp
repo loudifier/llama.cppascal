@@ -861,6 +861,15 @@ const llama_model_loader::llama_tensor_weight & llama_model_loader::require_weig
     return *weight;
 }
 
+std::vector<std::pair<std::string, struct ggml_tensor *>> llama_model_loader::get_all_tensor_meta() const {
+    std::vector<std::pair<std::string, struct ggml_tensor *>> out;
+    out.reserve(weights_map.size());
+    for (const auto & kv : weights_map) {
+        out.emplace_back(kv.first, kv.second.tensor);
+    }
+    return out;
+}
+
 struct ggml_tensor * llama_model_loader::get_tensor_meta(const char * name) const {
     const auto * weight = get_weight(name);
     if (!weight) {

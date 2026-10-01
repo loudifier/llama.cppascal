@@ -1588,14 +1588,89 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     const int i_gpu_start = std::max(n_layer_all + 1 - n_gpu_layers, 0);
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
+
+    // size-aware device assignment for the GPU layers: keep the layers on each
+    // device in contiguous blocks (a device switch moves the hidden state over
+    // PCIe, so alternating layers are slow) and pick the split point so the
+    // block byte sizes track the split targets. the legacy assignment below
+    // uses the layer index only, which skews VRAM when tensor overrides (e.g.
+    // -ncmoe experts) move big tensors to the CPU afterwards.
+    // -1 = not assigned yet, use the legacy rule.
+    std::vector<int> layer_dev(n_layer_all + 1, -1);
+    if (split_mode == LLAMA_SPLIT_MODE_LAYER && devices.size() == 2
+        && getenv("GGML_DISABLE_SIZE_AWARE") == nullptr) {
+        std::vector<size_t> layer_bytes(n_layer_all, 0);
+        bool any = false;
+        for (const auto & meta : ml.get_all_tensor_meta()) {
+            int il = -1;
+            if (sscanf(meta.first.c_str(), "blk.%d.", &il) != 1 || il < 0 || il >= n_layer_all) {
+                continue;
+            }
+            // tensors with a buft override don't count toward the GPU load
+            if (params.tensor_buft_overrides) {
+                bool overridden = false;
+                for (const auto * o = params.tensor_buft_overrides; o->pattern != nullptr; ++o) {
+                    if (std::regex_search(meta.first, std::regex(o->pattern))) {
+                        overridden = true;
+                        break;
+                    }
+                }
+                if (overridden) {
+                    continue;
+                }
+            }
+            layer_bytes[il] += ggml_nbytes(meta.second);
+            any = true;
+        }
+        if (any) {
+            const int n_gpu = std::min(act_gpu_layers, n_layer_all - i_gpu_start);
+            size_t total = 0;
+            for (int k = 0; k < n_gpu; ++k) {
+                total += layer_bytes[i_gpu_start + k];
+            }
+            // the split point that puts a fraction close to the first device's share
+            const float share0 = splits[0];
+            int best_k = 1;
+            double best_err = 1e300;
+            size_t pref = 0;
+            for (int k = 1; k < n_gpu; ++k) {
+                pref += layer_bytes[i_gpu_start + k - 1];
+                const double err = std::abs((double) pref / (double) total - (double) share0);
+                if (err < best_err) {
+                    best_err = err;
+                    best_k = k;
+                }
+            }
+            for (int il = i_gpu_start; il < i_gpu_start + n_gpu; ++il) {
+                layer_dev[il] = il - i_gpu_start < best_k ? 0 : 1;
+            }
+            // output layer to the device with the less load
+            size_t load0 = 0, load1 = 0;
+            for (int il = i_gpu_start; il < i_gpu_start + n_gpu; ++il) {
+                if (il - i_gpu_start < best_k) {
+                    load0 += layer_bytes[il];
+                } else {
+                    load1 += layer_bytes[il];
+                }
+            }
+            layer_dev[n_layer_all] = load1 <= load0 ? 1 : 0;
+            for (int il = i_gpu_start; il <= n_layer_all; ++il) {
+                LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s (size-aware, %zu MiB)\n",
+                    il, ggml_backend_dev_name(devices.at(layer_dev[il]).dev),
+                    il < n_layer_all ? layer_bytes[il] / 1024 / 1024 : 0);
+            }
+        }
+    }
+
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
             return {cpu_dev, &pimpl->cpu_buft_list};
         }
-        const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin();
-        auto * dev = devices.at(layer_gpu).dev;
+        auto * dev = layer_dev[il] >= 0
+            ? devices.at(layer_dev[il]).dev
+            : devices.at(std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin()).dev;
         LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
         return {dev, &pimpl->gpu_buft_list.at(dev)};
     };
