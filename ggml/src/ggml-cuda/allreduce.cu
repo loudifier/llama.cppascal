@@ -168,7 +168,7 @@ static __global__ void ggml_cuda_ar_kernel(
 #elif __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
             __nanosleep(100);
 #else
-            NO_DEVICE_CODE;
+            // pre-Volta has no sleep intrinsic: tight spin on a volatile load
 #endif // GGML_USE_HIP
         }
     }
@@ -405,17 +405,8 @@ ggml_cuda_ar_pipeline * ggml_cuda_ar_pipeline_init(const int * devices, size_t n
         return nullptr;
     }
 
-    // The chunked kernel uses __nanosleep (NVIDIA, sm70+) or
-    // __builtin_amdgcn_s_sleep (AMD).
-    for (size_t i = 0; i < n_devices; ++i) {
-        const int cc = ggml_cuda_info().devices[devices[i]].cc;
-        if (cc < GGML_CUDA_CC_VOLTA) {
-            GGML_LOG_DEBUG("%s: internal AllReduce requires compute capability >= %d "
-                           "(device %d has cc=%d); falling back\n",
-                           __func__, GGML_CUDA_CC_VOLTA, devices[i], cc);
-            return nullptr;
-        }
-    }
+    // Pre-Volta (sm6x) has no __nanosleep, so the spin loop tight-spins
+    // there instead; everything else is arch-portable.
 
     auto * p = new ggml_cuda_ar_pipeline{};
     p->n_devices        = n_devices;
