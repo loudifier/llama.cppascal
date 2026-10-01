@@ -1,0 +1,141 @@
+name: Release (Pascal, windows)
+
+# Windows CUDA builds targeting Pascal (sm_60/61) with CUDA 12.9, the last
+# CUDA series that can target sm6x (CUDA 13.x removed Maxwell/Pascal/Volta).
+#
+# push to a branch: build + upload workflow artifacts
+# push to a v* tag: build + attach artifacts to a GitHub release
+#
+# The windows-2022 runner is required: it ships VS 2022 (MSVC 19.4x), the
+# newest toolset CUDA 12.9 nvcc accepts (newer toolsets are rejected).
+# No GPU is needed on the runner; nvcc cross-compiles.
+on:
+  push:
+    branches: [master, moe-balance]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: pascal-win-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: windows-cuda-12.9 (sm60/61)
+    runs-on: windows-2022
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Cuda Toolkit 12.9
+        shell: pwsh
+        run: |
+          mkdir -p "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+          choco install unzip -y
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-12.9.86-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.9.86-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.2.10-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.9.79-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_profiler_api/windows-x86_64/cuda_profiler_api-windows-x86_64-12.9.79-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/visual_studio_integration/windows-x86_64/visual_studio_integration-windows-x86_64-12.9.79-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvprof/windows-x86_64/cuda_nvprof-windows-x86_64-12.9.79-archive.zip"
+          curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-12.9.27-archive.zip"
+          unzip '*.zip' -d "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_cudart-windows-x86_64-12.9.79-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_nvcc-windows-x86_64-12.9.86-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_nvrtc-windows-x86_64-12.9.86-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\libcublas-windows-x86_64-12.9.2.10-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_nvtx-windows-x86_64-12.9.79-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_profiler_api-windows-x86_64-12.9.79-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\visual_studio_integration-windows-x86_64-12.9.79-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_nvprof-windows-x86_64-12.9.79-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\cuda_cccl-windows-x86_64-12.9.27-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" /E /I /H /Y
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "CUDA_PATH_V12_9=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.24
+        with:
+          key: pascal-windows-2022-cuda-12.9
+          evict-old-files: 1d
+
+      - name: Build
+        id: cmake_build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="60;61" ^
+            -DLLAMA_BUILD_BORINGSSL=ON
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Pack artifacts
+        id: pack_artifacts
+        shell: pwsh
+        run: |
+          7z a -snl llama-bin-win-cuda-12.9-pascal-x64.zip .\build\bin\Release\*
+          $dst = ".\build\bin\cudart\"
+          robocopy "${env:CUDA_PATH}\bin" $dst cudart64_*.dll cublas64_*.dll cublasLt64_*.dll | Out-Null
+          7z a cudart-llama-bin-win-cuda-12.9-pascal-x64.zip $dst\*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-bin-win-cuda-12.9-pascal-x64.zip
+          name: llama-bin-win-cuda-12.9-pascal-x64.zip
+
+      - name: Upload Cuda runtime
+        uses: actions/upload-artifact@v6
+        with:
+          path: cudart-llama-bin-win-cuda-12.9-pascal-x64.zip
+          name: cudart-llama-bin-win-cuda-12.9-pascal-x64.zip
+
+      - name: ccache-clear
+        uses: ./.github/actions/ccache-clear
+        with:
+          key: pascal-windows-2022-cuda-12.9
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.zip
+          body: |
+            Windows x64 build for Pascal (sm_60/61), CUDA 12.9 (last CUDA series
+            supporting Maxwell/Pascal/Volta).
+
+            - Extract both zips into the same folder: the main zip has the
+              executables and backends, the cudart zip has the CUDA runtime
+              DLLs (cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll).
+            - Recommended MoE config on 2x 8 GB: -ngl 99 -ncmoe 16
+            - The CUDA runtime DLLs are redistributed under the NVIDIA EULA:
+              https://docs.nvidia.com/cuda/eula/index.html
